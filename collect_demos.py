@@ -32,7 +32,7 @@ DATA_PATH = "demo_data.h5"
 FIRST_ATTEMPT_VIDEO = "initial_attempt.mp4"
 FIRST_SUCCESS_VIDEO = "initial_success.mp4"
 
-NUM_SUCCESSFUL_EPISODES = 60   # Increased dataset size (balanced for 9-hour timeline)
+NUM_SUCCESSFUL_EPISODES = 50   # Increased dataset size (balanced for 9-hour timeline)
 MAX_STEPS = 150
 
 # Small language variation (improves conditioning robustness)
