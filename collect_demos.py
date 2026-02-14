@@ -17,7 +17,7 @@ Outputs:
 """
 
 import robosuite as suite
-from robosuite.controllers import load_part_controller_config
+from robosuite.controllers import load_controller_config
 import numpy as np
 import h5py
 import imageio
@@ -53,7 +53,7 @@ LANGUAGE_TEMPLATES = [
 
 def create_env():
 
-    config = load_part_controller_config(default_controller="OSC_POSE")
+    config = load_controller_config(default_controller="OSC_POSE")
 
     env = suite.make(
         env_name="PickPlace",
