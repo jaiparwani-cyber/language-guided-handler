@@ -1,13 +1,14 @@
 """
 collect_demos.py
 
-Generates expert demonstrations for the Robosuite Lift task.
+Final version for Language-Guided Handler Challenge
 
-We use:
-- Robot: Franka Panda
-- Task: Lift
-- Input saved: RGB images + action vectors + language instruction
-- Ground-truth state is used ONLY for expert control (allowed during data collection).
+Task: Robosuite PickPlace
+Robot: Franka Panda
+Inputs saved: RGB images + action vectors + language instruction
+
+Ground-truth state is used ONLY for expert control.
+No GT state is saved in dataset.
 
 Outputs:
 - demo_data.h5
@@ -16,7 +17,7 @@ Outputs:
 """
 
 import robosuite as suite
-from robosuite.controllers import load_controller_config
+from robosuite.controllers import load_part_controller_config
 import numpy as np
 import h5py
 import imageio
@@ -32,50 +33,18 @@ DATA_PATH = "demo_data.h5"
 FIRST_ATTEMPT_VIDEO = "initial_attempt.mp4"
 FIRST_SUCCESS_VIDEO = "initial_success.mp4"
 
-NUM_SUCCESSFUL_EPISODES = 50   # Increased dataset size (balanced for 9-hour timeline)
-MAX_STEPS = 150
+NUM_SUCCESSFUL_EPISODES = 50
+MAX_STEPS = 200
 
-# Small language variation (improves conditioning robustness)
+# Balanced language diversity (good for 50 demos)
 LANGUAGE_TEMPLATES = [
-    "Lift the cube.",
-    "Pick up the cube.",
-    "Grab the cube.",
-    "Please lift the cube."
+    "Pick the object and place it in the bin.",
+    "Move the object into the bin.",
+    "Put the object in the bin.",
+    "Pick it up and place it in the bin.",
+    "Transfer the object to the bin.",
+    "Place the object inside the bin."
 ]
-
-
-# =========================
-# Expert Policy
-# =========================
-
-def scripted_expert(obs):
-    """
-    State-based expert controller for Lift task.
-
-    Uses ground-truth object and robot state ONLY during data collection.
-    This is allowed because the trained model will NOT receive GT state.
-    """
-
-    cube_pos = obs["cube_pos"]
-    eef_pos = obs["robot0_eef_pos"]
-    gripper_qpos = obs["robot0_gripper_qpos"][0]
-
-    action = np.zeros(7)
-
-    # Phase 1: Move above cube
-    target_above = cube_pos + np.array([0, 0, 0.10])
-    delta = target_above - eef_pos
-    action[:3] = np.clip(delta, -0.05, 0.05)
-
-    # Phase 2: Close gripper when aligned
-    if np.linalg.norm(delta) < 0.02:
-        action[6] = 1.0
-
-    # Phase 3: Lift after grasp
-    if gripper_qpos < 0.02:
-        action[2] = 0.05
-
-    return action
 
 
 # =========================
@@ -83,20 +52,15 @@ def scripted_expert(obs):
 # =========================
 
 def create_env():
-    """
-    Creates Lift environment with:
-    - Offscreen rendering (for RGB capture)
-    - No on-screen GUI
-    """
 
-    config = load_controller_config(default_controller="OSC_POSE")
+    config = load_part_controller_config(default_controller="OSC_POSE")
 
     env = suite.make(
-        env_name="Lift",
+        env_name="PickPlace",
         robots="Panda",
         controller_configs=config,
-        has_renderer=False,               # No live GUI window
-        has_offscreen_renderer=True,      # Enables RGB image capture
+        has_renderer=False,
+        has_offscreen_renderer=True,
         use_camera_obs=True,
         camera_names="agentview",
         reward_shaping=True,
@@ -106,15 +70,71 @@ def create_env():
 
 
 # =========================
-# Data Collection Loop
+# Scripted Expert Policy
+# =========================
+
+def scripted_expert(obs, env):
+    """
+    Multi-phase expert:
+    1. Move above object
+    2. Close gripper
+    3. Move above bin
+    4. Release
+    """
+
+    # Object position (first 3 dims of object-state)
+    object_pos = obs["object-state"][:3]
+
+    eef_pos = obs["robot0_eef_pos"]
+    gripper_qpos = obs["robot0_gripper_qpos"][0]
+
+    # Get bin world position from Mujoco
+    bin_body_id = env.sim.model.body_name2id("bin1")
+    bin_pos = env.sim.data.body_xpos[bin_body_id]
+
+    action = np.zeros(7)
+
+    # ------------------------
+    # Phase 1: Move above object
+    # ------------------------
+    target_obj = object_pos + np.array([0, 0, 0.10])
+    delta_obj = target_obj - eef_pos
+    action[:3] = np.clip(delta_obj, -0.05, 0.05)
+
+    # ------------------------
+    # Phase 2: Close gripper
+    # ------------------------
+    if np.linalg.norm(delta_obj) < 0.02:
+        action[6] = 1.0
+
+    # ------------------------
+    # Phase 3: If grasped, move above bin
+    # ------------------------
+    if gripper_qpos < 0.02:
+        target_bin = bin_pos + np.array([0, 0, 0.15])
+        delta_bin = target_bin - eef_pos
+        action[:3] = np.clip(delta_bin, -0.05, 0.05)
+
+        # ------------------------
+        # Phase 4: Release at bin
+        # ------------------------
+        if np.linalg.norm(delta_bin) < 0.03:
+            action[6] = -1.0
+
+    return action
+
+
+# =========================
+# Data Collection
 # =========================
 
 def collect_demos():
 
-    # Remove old files if they exist
+    # Clean previous files
     for file in [DATA_PATH, FIRST_ATTEMPT_VIDEO, FIRST_SUCCESS_VIDEO]:
         if os.path.exists(file):
             os.remove(file)
+            print(f"Deleted old file: {file}")
 
     env = create_env()
 
@@ -122,28 +142,25 @@ def collect_demos():
     grp = data_file.create_group("data")
 
     successful_episodes = 0
-    episode_counter = 0
-
     first_attempt_recorded = False
     first_success_recorded = False
 
-    print("Starting data collection...")
+    print("Starting PickPlace data collection...")
 
     while successful_episodes < NUM_SUCCESSFUL_EPISODES:
 
         obs = env.reset()
+
+        instruction = random.choice(LANGUAGE_TEMPLATES)
 
         images = []
         actions = []
         attempt_video_frames = []
         success_video_frames = []
 
-        # Randomly choose instruction for this episode
-        instruction = random.choice(LANGUAGE_TEMPLATES)
-
         for step in range(MAX_STEPS):
 
-            action = scripted_expert(obs)
+            action = scripted_expert(obs, env)
             obs, reward, done, info = env.step(action)
 
             img = obs["agentview_image"]
@@ -151,24 +168,22 @@ def collect_demos():
             images.append(img)
             actions.append(action)
 
-            # Record first-ever episode (even if failure)
             if not first_attempt_recorded:
                 attempt_video_frames.append(img)
 
-            # Record first successful episode
             if not first_success_recorded:
                 success_video_frames.append(img)
 
             if env._check_success():
                 break
 
-        # Save first attempt video
+        # Save first-ever attempt
         if not first_attempt_recorded:
-            print("Saving first-ever attempt video...")
             imageio.mimsave(FIRST_ATTEMPT_VIDEO, attempt_video_frames, fps=20)
             first_attempt_recorded = True
+            print("Saved first attempt video.")
 
-        # Save only successful episodes
+        # Save successful episodes only
         if env._check_success():
 
             ep_grp = grp.create_group(f"demo_{successful_episodes}")
@@ -179,13 +194,10 @@ def collect_demos():
             successful_episodes += 1
             print(f"Saved successful episode {successful_episodes}")
 
-            # Save first successful episode video
             if not first_success_recorded:
-                print("Saving first successful episode video...")
                 imageio.mimsave(FIRST_SUCCESS_VIDEO, success_video_frames, fps=20)
                 first_success_recorded = True
-
-        episode_counter += 1
+                print("Saved first success video.")
 
     data_file.close()
 
